@@ -3,7 +3,6 @@
 
 use crate::devices::*;
 use crate::types::*;
-use std::io;
 use std::sync::{Arc, Mutex};
 use log;
 
@@ -160,7 +159,13 @@ impl EmsController {
     /// Result indicating success or error message
     pub fn remove_charger_device(&mut self, id: &str) -> Result<(), String> {
         let initial_len = self.charger_devices.len();
-        self.charger_devices.retain(|c| c.id != id);
+        self.charger_devices.retain(|c| {
+            if let Ok(locked) = c.lock() {
+                locked.id != id
+            } else {
+                true // Keep if mutex is poisoned
+            }
+        });
         if self.charger_devices.len() == initial_len {
             return Err(format!("Charger device with ID '{}' not found", id));
         }
@@ -405,7 +410,7 @@ impl EmsController {
         let power_per_charger = (max_power / active_chargers as f32).min(self.config.max_charger_power);
 
         for charger in &self.charger_devices {
-            let mut charger_locked = charger.lock().map_err(|_| "Mutex poisoned".to_string())?;
+            let charger_locked = charger.lock().map_err(|_| "Mutex poisoned".to_string())?;
             if charger_locked.get_cached_status().charging {
                 charger_locked.set_power_setpoint(power_per_charger)
                     .map_err(|e| format!("Failed to set charger power: {}", e))?;

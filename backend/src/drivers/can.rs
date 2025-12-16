@@ -1,9 +1,11 @@
 // CAN 设备驱动 (socketcan + can-frame)
 // CAN 总线通信模块，提供可靠的 CAN 通信接口
 
-use tokio_socketcan::CanSocket;
+use socketcan::CanSocket;
 use socketcan::CanFrame;
+use socketcan::Socket;
 use std::io;
+use std::fmt;
 use std::time::Duration;
 
 /// CAN 通信错误类型
@@ -174,7 +176,7 @@ impl CanDriver {
     pub fn send_frame(&self, frame: &CanFrame) -> Result<(), CanError> {
         let socket = self.socket.as_ref()
             .ok_or_else(|| CanError::ConnectionFailed("Not connected".to_string()))?;
-        socket.write_frame(frame)?;
+        socket.write_frame_insist(frame)?;
         Ok(())
     }
 
@@ -185,7 +187,7 @@ impl CanDriver {
     pub fn recv_frame(&self) -> Result<CanFrame, CanError> {
         let socket = self.socket.as_ref()
             .ok_or_else(|| CanError::ConnectionFailed("Not connected".to_string()))?;
-        socket.read_frame().map_err(Into::into)
+        socket.read_frame_timeout(self.config.timeout).map_err(Into::into)
     }
 
     /// 非阻塞接收 CAN 帧
@@ -196,7 +198,7 @@ impl CanDriver {
         let socket = self.socket.as_ref()
             .ok_or_else(|| CanError::ConnectionFailed("Not connected".to_string()))?;
 
-        match socket.read_frame() {
+        match socket.read_frame_timeout(Duration::from_millis(0)) {
             Ok(frame) => Ok(Some(frame)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(e) => Err(e.into()),
@@ -208,5 +210,14 @@ impl Drop for CanDriver {
     /// 在结构体销毁时自动断开连接
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+
+impl fmt::Debug for CanDriver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CanDriver")
+            .field("config", &self.config)
+            .field("connected", &self.socket.is_some())
+            .finish()
     }
 }

@@ -5,7 +5,7 @@ use crate::types::*;
 use crate::drivers::modbus::{ModbusClient, ModbusError};
 use std::io;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GensetDevice {
     pub id: String,
     modbus_client: Option<ModbusClient>,

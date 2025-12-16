@@ -1,9 +1,8 @@
 // MQTT 客户端实现，用于发布 EMS 状态到云端
-use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, QoS};
+use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use serde::Serialize;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::mpsc;
 
 /// Custom error type for MQTT operations
 #[derive(Error, Debug)]
@@ -140,5 +139,47 @@ impl Drop for MqttClient {
         // Ensure we disconnect on drop (synchronously if possible)
         // Note: Async drop is not stable, so we can't await here
         // In practice, call disconnect() explicitly before dropping
+    }
+}
+
+/// Cloud Driver 结构体
+/// 提供云通信驱动的统一接口
+pub struct CloudDriver {
+    client: Option<MqttClient>,
+}
+
+impl CloudDriver {
+    /// 创建新的 CloudDriver 实例
+    pub fn new() -> Self {
+        Self { client: None }
+    }
+
+    /// 初始化云驱动
+    pub fn init(&mut self) -> Result<(), MqttError> {
+        let config = MqttConfig::default();
+        let client = MqttClient::new(config)?;
+        self.client = Some(client);
+        Ok(())
+    }
+
+    /// 连接到云端
+    pub async fn connect(&mut self) -> Result<(), MqttError> {
+        if let Some(client) = &mut self.client {
+            client.connect().await?;
+        }
+        Ok(())
+    }
+
+    /// 发布字符串到指定主题
+    pub async fn publish_str(&self, topic: &str, payload: &str) -> Result<(), MqttError> {
+        if let Some(client) = &self.client {
+            client.publish_str(topic, payload).await?;
+        }
+        Ok(())
+    }
+
+    /// 检查连接状态
+    pub fn is_connected(&self) -> bool {
+        self.client.as_ref().map(|c| c.is_connected()).unwrap_or(false)
     }
 }

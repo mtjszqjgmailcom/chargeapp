@@ -1,0 +1,20 @@
+{
+  "package": {
+    "productName": "ems-backend",
+    "version": "0.1.0"
+  },
+  "build": {
+    "beforeDevCommand": "cd ../frontend && npm run dev",
+    "devPath": "http://localhost:1420",
+    "beforeBuildCommand": "cd ../frontend && npm run build",
+    "distDir": "../frontend/dist"
+  },
+  "tauri": {
+    "bundle": {
+      "active": false,
+      "targets": [],
+      "identifier": "com.chargeapp.ems-backend"
+    }
+  },
+  "plugins": {}
+}

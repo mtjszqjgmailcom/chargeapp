@@ -1,0 +1,16 @@
+{
+  "charger_id": "charger1",
+  "charger_interface": "can0",
+  "battery_id": "battery1",
+  "battery_interface": "can0",
+  "pcs_id": "pcs1",
+  "pcs_host": "127.0.0.1",
+  "pcs_port": 502,
+  "pv_dcdc_id": "pv_dcdc1",
+  "pv_dcdc_host": "127.0.0.1",
+  "pv_dcdc_port": 501,
+  "genset_id": "genset1",
+  "genset_host": "127.0.0.1",
+  "genset_port": 503,
+  "can_interface": "can0"
+}

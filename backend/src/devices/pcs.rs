@@ -5,7 +5,7 @@ use crate::types::*;
 use crate::drivers::modbus::{ModbusClient, ModbusError};
 use std::io;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PcsDevice {
     /// Device identifier
     pub id: String,
@@ -127,8 +127,8 @@ impl PcsDevice {
     }
 
     /// Set operating mode
-    pub fn set_mode(&self, mode: PcsMode) -> Result<(), ModbusError> {
-        if let Some(client) = &self.modbus_client {
+    pub fn set_mode(&mut self, mode: PcsMode) -> Result<(), ModbusError> {
+        if let Some(client) = &mut self.modbus_client {
             let mode_value = mode as u16;
             client.write_single_register(1, mode_value)?;
             Ok(())
@@ -144,8 +144,8 @@ impl PcsDevice {
     ///
     /// # Returns
     /// Result indicating success or ModbusError
-    pub fn write_status(&self, status: PcsStatus) -> Result<(), ModbusError> {
-        if let Some(client) = &self.modbus_client {
+    pub fn write_status(&mut self, status: PcsStatus) -> Result<(), ModbusError> {
+        if let Some(client) = &mut self.modbus_client {
             // Map mode string to register value
             let mode_value = match status.mode.as_str() {
                 "Standby" => 0,
@@ -175,8 +175,8 @@ impl PcsDevice {
     ///
     /// # Returns
     /// Result indicating success or ModbusError
-    pub fn set_power_setpoint(&self, power: f32) -> Result<(), ModbusError> {
-        if let Some(client) = &self.modbus_client {
+    pub fn set_power_setpoint(&mut self, power: f32) -> Result<(), ModbusError> {
+        if let Some(client) = &mut self.modbus_client {
             // Clamp power to reasonable range (-100 to 100 kW)
             let clamped_power = power.clamp(-100.0, 100.0);
             let register_value = ((clamped_power * Self::SCALE_POWER) as i16) as u16; // Handle negative as unsigned

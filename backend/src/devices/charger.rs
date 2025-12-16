@@ -3,11 +3,12 @@
 
 use crate::types::*;
 use crate::drivers::can::CanDriver;
-use socketcan::CanFrame;
+use socketcan::{CanFrame, CanDataFrame, EmbeddedFrame, StandardId, Id};
+use serde::{Serialize, Deserialize};
 use std::io;
 
 /// Charger device with CAN communication
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ChargerDevice {
     /// Device identifier
     pub id: String,
@@ -79,6 +80,22 @@ impl ChargerDevice {
     const MAX_CAN_DATA_SIZE: usize = 8;    // Maximum bytes in a standard CAN frame
     const MAX_FAULT_CODES: usize = 2;      // Maximum fault codes that fit within 8-byte limit (base 12 bytes + 4 bytes for 2 codes = 16, but limited to 8)
 
+    // === CAN ID Constants ===
+    const STATUS_REQUEST_ID: StandardId = StandardId::new(0x200).unwrap();
+    const STATUS_RESPONSE_ID: StandardId = StandardId::new(0x201).unwrap();
+
+    /// Helper method to update cached fields from status
+    fn update_cache(&mut self, status: &ChargerStatus) {
+        self.charging = status.charging;
+        self.power = status.power;
+        self.voltage = status.voltage;
+        self.current = status.current;
+        self.temperature = status.temperature;
+        self.efficiency = status.efficiency;
+        self.fault = status.fault;
+        self.fault_codes = status.fault_codes.clone(); // Cloning is acceptable for small Vec<u16>
+    }
+
     /// Create a new charger device with CAN communication
     ///
     /// # Arguments
@@ -89,7 +106,7 @@ impl ChargerDevice {
     /// Result containing the device or IO error
     pub fn new(id: String, can_interface: &str) -> Result<Self, io::Error> {
         let mut can_driver = CanDriver::new(can_interface);
-        can_driver.init()?;
+        can_driver.connect().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(Self {
             id,
             can_driver: Some(can_driver),
@@ -245,33 +262,37 @@ impl ChargerDevice {
     /// # Returns
     /// Result containing ChargerStatus or IO error
     pub fn read_status(&mut self) -> Result<ChargerStatus, io::Error> {
-        if let Some(driver) = &self.can_driver {
-            // Send read request
-            let request_frame = CanFrame::new(0x200, &[0x01]).unwrap();
-            driver.send_frame(&request_frame)?;
+        // Early return if driver not initialized
+        let driver = self.can_driver.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized")
+        })?;
 
-            // Receive response (in real implementation, might need timeout/retry logic)
-            let response_frame = driver.recv_frame()?;
-            if response_frame.id() == 0x201 {
-                let status = Self::unpack_charger_status(response_frame.data()).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid CAN frame data"))?;
+        // Prepare and send request frame
+        let request_data = &[0x01];
+        let request_frame = CanDataFrame::new(Self::STATUS_REQUEST_ID, request_data)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid request frame data"))?;
+        driver.send_frame(&CanFrame::Data(request_frame))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-                // Update cached fields
-                self.charging = status.charging;
-                self.power = status.power;
-                self.voltage = status.voltage;
-                self.current = status.current;
-                self.temperature = status.temperature;
-                self.efficiency = status.efficiency;
-                self.fault = status.fault;
-                self.fault_codes = status.fault_codes.clone();
+        // Receive response (TODO: Add timeout/retry logic in production, e.g., via async with tokio::time::timeout)
+        // For sync code, consider a loop with std::thread::sleep and a timeout counter
+        let response_frame = driver.recv_frame()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-                Ok(status)
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID"))
-            }
-        } else {
-            Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
-        }
+        // Validate response and extract data frame
+        let data_frame = match response_frame {
+            CanFrame::Data(df) if df.id() == Id::Standard(Self::STATUS_RESPONSE_ID) => df,
+            CanFrame::Data(_) => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID")),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected data frame")),
+        };
+
+        // Unpack status, handling invalid data
+        let status = Self::unpack_charger_status(&data_frame.data()[..data_frame.dlc() as usize])
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid CAN frame data"))?;
+
+        // Update cache and return
+        self.update_cache(&status);
+        Ok(status)
     }
 
     /// Read car battery information from the vehicle via CAN
@@ -281,17 +302,19 @@ impl ChargerDevice {
     pub fn read_car_battery(&mut self) -> Result<CarBattery, io::Error> {
         if let Some(driver) = &self.can_driver {
             // Send read request for battery data (assume CAN ID 0x205)
-            let request_frame = CanFrame::new(0x205, &[0x01]).unwrap();
-            driver.send_frame(&request_frame)?;
+            let request_frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x205).unwrap(), &[0x01]).unwrap());
+            driver.send_frame(&request_frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
             // Receive response
-            let response_frame = driver.recv_frame()?;
-            if response_frame.id() == 0x206 {
-                let battery = Self::unpack_car_battery(response_frame.data()).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid CAN frame data for CarBattery"))?;
-                // Optionally cache if needed, but for now return directly
-                Ok(battery)
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID for CarBattery"))
+            let response_frame = driver.recv_frame().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            match response_frame {
+                CanFrame::Data(data_frame) if data_frame.id() == Id::Standard(StandardId::new(0x206).unwrap()) => {
+                    let battery = Self::unpack_car_battery(&data_frame.data()[..data_frame.dlc() as usize]).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid CAN frame data for CarBattery"))?;
+                    // Optionally cache if needed, but for now return directly
+                    Ok(battery)
+                }
+                CanFrame::Data(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID for CarBattery")),
+                _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Expected data frame for CarBattery")),
             }
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
@@ -325,8 +348,8 @@ impl ChargerDevice {
                 ChargerMode::Charging => 1u8,
                 ChargerMode::Fault => 2u8,
             };
-            let frame = CanFrame::new(0x202, &[mode_value]).unwrap();
-            driver.send_frame(&frame)
+            let frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x202).unwrap(), &[mode_value]).unwrap());
+            driver.send_frame(&frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
         }
@@ -342,8 +365,8 @@ impl ChargerDevice {
     pub fn write_status(&self, status: ChargerStatus) -> Result<(), io::Error> {
         if let Some(driver) = &self.can_driver {
             let data = Self::pack_charger_status(&status)?;
-            let frame = CanFrame::new(0x203, &data).unwrap();
-            driver.send_frame(&frame)
+            let frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x203).unwrap(), &data).unwrap());
+            driver.send_frame(&frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
         }
@@ -362,8 +385,8 @@ impl ChargerDevice {
             let clamped_power = power.clamp(0.0, 50.0);
             let power_value = (clamped_power * Self::SCALE_POWER) as u16;
             let data = power_value.to_be_bytes();
-            let frame = CanFrame::new(0x204, &data).unwrap();
-            driver.send_frame(&frame)
+            let frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x204).unwrap(), &data).unwrap());
+            driver.send_frame(&frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
         }

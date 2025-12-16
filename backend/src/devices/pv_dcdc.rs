@@ -3,7 +3,6 @@
 
 use crate::types::*;
 use crate::drivers::modbus::{ModbusClient, ModbusError};
-use std::io;
 
 /// Operating modes for PV DCDC device
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,7 +17,7 @@ pub enum PvMode {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PvDevice {
+pub struct PvDcdcDevice {
     /// Device identifier
     pub id: String,
     /// Modbus client for communication
@@ -36,7 +35,7 @@ pub struct PvDevice {
     pub mppt_voltage: f32,   // MPPT tracking voltage in V
 }
 
-impl PvDevice {
+impl PvDcdcDevice {
     // Scaling constants for Modbus register values
     const SCALE_VOLTAGE: f32 = 10.0;    // Voltage in 0.1V units
     const SCALE_CURRENT: f32 = 10.0;    // Current in 0.1A units
@@ -54,10 +53,10 @@ impl PvDevice {
     /// * `port` - Modbus server port
     ///
     /// # Returns
-    /// Result containing the device or IO error
-    pub fn new(id: String, host: &str, port: u16) -> Result<Self, io::Error> {
+    /// Result containing the device or ModbusError
+    pub fn new(id: String, host: &str, port: u16) -> Result<Self, ModbusError> {
         let mut modbus_client = ModbusClient::new(host, port);
-        modbus_client.connect().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        modbus_client.connect()?;
         Ok(Self {
             id,
             modbus_client: Some(modbus_client),

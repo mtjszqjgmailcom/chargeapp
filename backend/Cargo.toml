@@ -10,7 +10,7 @@ serialport = "4.2"
 socketcan = "2.0"
 tokio-socketcan = "0.3"
 tokio = { version = "1", features = ["full"] }
-tokio-modbus = "0.10"
+modbus = "1.0"
 rumqttc = "0.24"  # MQTT 客户端
 thiserror = "1.0"
 anyhow = "1.0"
@@ -19,3 +19,5 @@ tauri = { version = "1.0", features = ["shell-open"] }
 tiny_http = "0.12"
 log = "0.4"
 env_logger = "0.10"
+
+[build-dependencies]

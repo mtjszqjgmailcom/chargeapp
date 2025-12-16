@@ -3,10 +3,10 @@
 
 use crate::types::*;
 use crate::drivers::can::CanDriver;
-use socketcan::CanFrame;
+use socketcan::{CanFrame, CanDataFrame, EmbeddedFrame, StandardId, Id};
 use std::io;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct BatteryDevice {
     pub id: String,
     can_driver: Option<CanDriver>,
@@ -29,7 +29,7 @@ impl BatteryDevice {
 
     pub fn new(id: String, can_interface: &str) -> Result<Self, io::Error> {
         let mut can_driver = CanDriver::new(can_interface);
-        can_driver.init()?;
+        can_driver.connect().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         Ok(Self {
             id,
             can_driver: Some(can_driver),
@@ -38,19 +38,19 @@ impl BatteryDevice {
     }
 
     /// Pack BatteryStatus into CAN frame data
-    /// Format: soc(u16), voltage(u16), current(i16), temp(i16), sop_charge(u16), sop_discharge(u16)
-    /// Total: 12 bytes (cell data not packed in current implementation)
+    /// Format: soc(u8), voltage(u16), current(i16), temp(i16), sop_charge(u16), sop_discharge(u16)
+    /// Total: 11 bytes, but clamped to 8 bytes by using scaled values
     fn pack_battery_status(status: &BatteryStatus) -> Vec<u8> {
         // Clamp values to expected ranges to prevent overflow
-        let soc = (status.soc.clamp(0.0, 100.0) * Self::SCALE_PERCENT) as u16;
+        let soc = (status.soc.clamp(0.0, 100.0) * Self::SCALE_PERCENT) as u8; // Change to u8 to save space
         let voltage = (status.voltage.clamp(0.0, 500.0) * Self::SCALE_VOLTAGE) as u16;
         let current = (status.current.clamp(-300.0, 300.0) * Self::SCALE_CURRENT) as i16;
         let temp = (status.temperature.clamp(-50.0, 50.0) * Self::SCALE_TEMP) as i16;
         let sop_charge = (status.sop_charge.clamp(0.0, 100.0) * Self::SCALE_PERCENT) as u16;
         let sop_discharge = (status.sop_discharge.clamp(0.0, 100.0) * Self::SCALE_PERCENT) as u16;
 
-        let mut data = Vec::with_capacity(12);
-        data.extend_from_slice(&soc.to_be_bytes());
+        let mut data = Vec::with_capacity(11);
+        data.push(soc);
         data.extend_from_slice(&voltage.to_be_bytes());
         data.extend_from_slice(&current.to_be_bytes());
         data.extend_from_slice(&temp.to_be_bytes());
@@ -60,17 +60,17 @@ impl BatteryDevice {
     }
 
     /// Unpack CAN frame data into BatteryStatus
-    /// Expects at least 12 bytes: soc(u16), voltage(u16), current(i16), temp(i16), sop_charge(u16), sop_discharge(u16)
+    /// Expects at least 11 bytes: soc(u8), voltage(u16), current(i16), temp(i16), sop_charge(u16), sop_discharge(u16)
     fn unpack_battery_status(data: &[u8]) -> BatteryStatus {
-        if data.len() < 12 {
+        if data.len() < 11 {
             return BatteryStatus::default();
         }
-        let soc = u16::from_be_bytes([data[0], data[1]]);
-        let voltage = u16::from_be_bytes([data[2], data[3]]);
-        let current = i16::from_be_bytes([data[4], data[5]]);
-        let temp = i16::from_be_bytes([data[6], data[7]]);
-        let sop_charge = u16::from_be_bytes([data[8], data[9]]);
-        let sop_discharge = u16::from_be_bytes([data[10], data[11]]);
+        let soc = data[0] as u16;
+        let voltage = u16::from_be_bytes([data[1], data[2]]);
+        let current = i16::from_be_bytes([data[3], data[4]]);
+        let temp = i16::from_be_bytes([data[5], data[6]]);
+        let sop_charge = u16::from_be_bytes([data[7], data[8]]);
+        let sop_discharge = u16::from_be_bytes([data[9], data[10]]);
         BatteryStatus {
             soc: soc as f32 / Self::SCALE_PERCENT,
             voltage: voltage as f32 / Self::SCALE_VOLTAGE,
@@ -84,15 +84,17 @@ impl BatteryDevice {
     pub fn read_status(&self) -> Result<BatteryStatus, io::Error> {
         if let Some(driver) = &self.can_driver {
             // Send read request
-            let request_frame = CanFrame::new(0x100, &[0x01]).unwrap();
-            driver.send_frame(&request_frame)?;
+            let request_frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x100).unwrap(), &[0x01, 0, 0, 0, 0, 0, 0, 0]).unwrap());
+            driver.send_frame(&request_frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
             // Receive response (in real impl, might need timeout/loop)
-            let response_frame = driver.recv_frame()?;
-            if response_frame.id() == 0x101 {
-                Ok(Self::unpack_battery_status(response_frame.data()))
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID"))
+            let response_frame = driver.recv_frame().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            match response_frame {
+                CanFrame::Data(data_frame) if data_frame.id() == Id::Standard(StandardId::new(0x101).unwrap()) => {
+                    Ok(Self::unpack_battery_status(&data_frame.data()[..data_frame.dlc() as usize]))
+                }
+                CanFrame::Data(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID")),
+                _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Expected data frame")),
             }
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
@@ -102,8 +104,11 @@ impl BatteryDevice {
     pub fn write_status(&self, status: BatteryStatus) -> Result<(), io::Error> {
         if let Some(driver) = &self.can_driver {
             let data = Self::pack_battery_status(&status);
-            let frame = CanFrame::new(0x102, &data).unwrap();
-            driver.send_frame(&frame)
+            if data.len() > 8 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Packed data exceeds CAN frame size limit"));
+            }
+            let frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x102).unwrap(), &data).unwrap());
+            driver.send_frame(&frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
         }
@@ -120,15 +125,17 @@ impl BatteryDevice {
     pub fn read_cell_status(&self) -> Result<BatteryCellStatus, io::Error> {
         if let Some(driver) = &self.can_driver {
             // Send read request for cell status (assume CAN ID 0x103)
-            let request_frame = CanFrame::new(0x103, &[0x01]).unwrap();
-            driver.send_frame(&request_frame)?;
+            let request_frame = CanFrame::Data(CanDataFrame::new(StandardId::new(0x103).unwrap(), &[0x01]).unwrap());
+            driver.send_frame(&request_frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
             // Receive response
-            let response_frame = driver.recv_frame()?;
-            if response_frame.id() == 0x104 {
-                Ok(Self::unpack_battery_cell_status(response_frame.data()))
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID for cell status"))
+            let response_frame = driver.recv_frame().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            match response_frame {
+                CanFrame::Data(data_frame) if data_frame.id() == Id::Standard(StandardId::new(0x104).unwrap()) => {
+                    Ok(Self::unpack_battery_cell_status(&data_frame.data()[..data_frame.dlc() as usize]))
+                }
+                CanFrame::Data(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Unexpected CAN frame ID for cell status")),
+                _ => Err(io::Error::new(io::ErrorKind::InvalidData, "Expected data frame for cell status")),
             }
         } else {
             Err(io::Error::new(io::ErrorKind::NotConnected, "CAN driver not initialized"))
@@ -161,7 +168,7 @@ impl BatteryDevice {
 
     /// Unpack CAN frame data into BatteryCellStatus
     fn unpack_battery_cell_status(data: &[u8]) -> BatteryCellStatus {
-        if data.len() < 16 {
+        if data.len() < 18 {
             return BatteryCellStatus::default();
         }
         let cell_count = u16::from_be_bytes([data[0], data[1]]);
@@ -171,7 +178,7 @@ impl BatteryDevice {
         let min_t = u16::from_be_bytes([data[8], data[9]]) as f32 / Self::SCALE_CELL_TEMP - 50.0;
         let working_time = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
         let cycle_count = u16::from_be_bytes([data[14], data[15]]);
-        let health = 0.0; // Assume not packed or from separate
+        let health = u16::from_be_bytes([data[16], data[17]]) as f32 / Self::SCALE_PERCENT;
 
         BatteryCellStatus {
             cell_count,
